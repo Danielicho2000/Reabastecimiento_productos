@@ -1,0 +1,10 @@
+name: reabastecimiento_productos
+title:
+username: planificacion-insumos
+account: planificacion-insumos
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 18204868
+bundleId: 12704604
+url: https://planificacion-insumos.shinyapps.io/reabastecimiento_productos/
+version: 1

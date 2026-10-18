@@ -16,17 +16,9 @@ R 4.2 o superior recomendado. Instala dependencias en la consola de R:
 install.packages(c("shiny", "DT", "ggplot2", "forecast", "lpSolve"))
 ```
 
-## Ejecutar
-
-1. Descomprime el ZIP.
-2. Abre la carpeta `CLSP_TW_Modular` en RStudio.
-3. Ejecuta:
-
 ```r
 shiny::runApp()
 ```
-
-No ejecutes `app.R` desde otra carpeta: las rutas `R/data.R`, etc., son relativas al directorio del proyecto.
 
 ## Formato del CSV real
 

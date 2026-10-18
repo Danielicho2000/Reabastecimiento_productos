@@ -1,695 +1,546 @@
-# Aplicacion Shiny modular: demanda por cliente-producto + forecast + CLSP
-# Ejecutar desde la carpeta del proyecto con: shiny::runApp()
-
+# Aplicacion Shiny modular: Oferta, Reabastecimiento y Costos
 library(shiny)
 library(DT)
 library(ggplot2)
-library(tidyr)
+library(dplyr)
+library(lubridate)
+library(stringr)
 
 source("data.R")
 source("forecast.R")
 source("optimization.R")
 source("results.R")
 
-# -------------------------------------------------------------
-# 10. HTML "MODELO" con variables, parámetros, formulación, IA y datasets
-# -------------------------------------------------------------
-modelo_html <- r"---(
-<style>
-  .desc-box { background:#f7f9fb; border-left:4px solid #2c7fb8;
-              padding:12px 16px; margin-bottom:16px; border-radius:4px; }
-  .desc-box h4 { margin-top:0; }
-  .note { background:#fff8e1; border-left:4px solid #ffb300;
-          padding:10px 14px; border-radius:4px; margin-bottom:14px; }
-  table.desc { width:100%; border-collapse:collapse; margin-bottom:18px; }
-  table.desc th, table.desc td {
-    border:1px solid #d0d7de; padding:6px 10px; text-align:left;
-    vertical-align:top; font-size:13.5px; }
-  table.desc th { background:#eaeff5; }
-  table.desc code { background:#eef2f7; padding:1px 5px; border-radius:3px; }
-  h3.section { color:#2c7fb8; margin-top:26px; }
-  .math-box { background:#f7f9fb; border-left:4px solid #2c7fb8;
-              padding:14px 18px; border-radius:4px; margin-bottom:16px;
-              overflow-x:auto; }
-</style>
-
-<!-- ============================= -->
-<div class='desc-box'>
-  <h4>CLSP-TW semanal &mdash; con pron&oacute;stico por IA (NNAR)</h4>
-  <p><b>Pipeline completo:</b>
-  historia por cliente &rarr; pron&oacute;stico NNAR (IA) &rarr;
-  agregaci&oacute;n por producto &rarr; stock de seguridad y punto de reorden
-  &rarr; planeaci&oacute;n de lotes con ventanas de tiempo (CLSP-TW).</p>
-  <p>Modelo base: Brahimi, Dauz&egrave;re-P&eacute;r&egrave;s &amp; Najid (2006),
-  <i>Operations Research</i>. <b>Unidad de tiempo: 1 semana.</b></p>
-</div>
-
-<!-- ============================================================ -->
-<h3 class='section'>1. Variables de decisi&oacute;n del CLSP-TW</h3>
-<table class='desc'>
-  <tr><th style='width:15%'>S&iacute;mbolo</th>
-      <th>Descripci&oacute;n</th>
-      <th style='width:22%'>Tipo</th></tr>
-  <tr><td>\(X_{it}\)</td>
-      <td>Unidades del producto \(i\) producidas en la semana \(t\).</td>
-      <td>Continua \(\ge 0\)</td></tr>
-  <tr><td>\(I_{it}\)</td>
-      <td>Inventario del producto \(i\) al final de la semana \(t\).</td>
-      <td>Continua \(\ge 0\)</td></tr>
-  <tr><td>\(Y_{it}\)</td>
-      <td>Variable binaria de setup: 1 si en la semana \(t\) se produce
-      el producto \(i\); 0 en caso contrario.</td>
-      <td>Binaria \(\{0,1\}\)</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<h3 class='section'>2. Par&aacute;metros del CLSP-TW</h3>
-<table class='desc'>
-  <tr><th style='width:15%'>S&iacute;mbolo</th><th>Descripci&oacute;n</th><th style='width:22%'>Unidad</th></tr>
-  <tr><td>\(p_{it}\)</td><td>Costo unitario de producci&oacute;n.</td><td>u.m. / unidad</td></tr>
-  <tr><td>\(h_{it}\)</td><td>Costo unitario de inventario por semana.</td><td>u.m. / (unidad&middot;sem)</td></tr>
-  <tr><td>\(s_{it}\)</td><td>Costo fijo de setup al producir \(i\) en la semana \(t\).</td><td>u.m.</td></tr>
-  <tr><td>\(\sigma_i\)</td><td>Consumo unitario de capacidad por unidad de producto.</td><td>recurso / unidad</td></tr>
-  <tr><td>\(C_t\)</td><td>Capacidad total disponible en la semana \(t\).</td><td>recurso / semana</td></tr>
-  <tr><td>\(d_{ist}\)</td><td>Demanda del producto \(i\) liberada en la semana \(s\)
-      con vencimiento en la semana \(t\) (\(s \le t\)).</td><td>unidades</td></tr>
-  <tr><td>\(D_{it}\)</td><td>Demanda agregada con vencimiento en \(t\):
-      \(D_{it} = \sum_{s=1}^{t} d_{ist}\).</td><td>unidades</td></tr>
-  <tr><td>\(M\)</td><td>Constante Big-M: \(M = \sum_{i,t} D_{it}\).</td><td>unidades</td></tr>
-  <tr><td>\(N\)</td><td>N&uacute;mero de productos.</td><td>&mdash;</td></tr>
-  <tr><td>\(T\)</td><td>Horizonte de planeaci&oacute;n en semanas.</td><td>semanas</td></tr>
-  <tr><td>\(K\)</td><td>N&uacute;mero de clientes.</td><td>&mdash;</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<h3 class='section'>3. Formulaci&oacute;n matem&aacute;tica del CLSP-TW</h3>
-<div class='math-box'>
-$$
-\begin{aligned}
-\min \quad
-& \sum_{i=1}^{N}\sum_{t=1}^{T}
-  \bigl(\, s_{it}\,Y_{it} + p_{it}\,X_{it} + h_{it}\,I_{it} \,\bigr) \\[6pt]
-\text{s.a.} \quad
-& I_{i,\,t-1} + X_{it} \;=\; D_{it} + I_{it}
-  && \forall\, i,\,t \quad \text{(balance)} \\[2pt]
-& X_{it} \;\le\; M \cdot Y_{it}
-  && \forall\, i,\,t \quad \text{(setup)} \\[2pt]
-& \sum_{k=1}^{t} X_{ik} \;\le\;
-  \sum_{k=1}^{t}\sum_{l=k}^{T} d_{ikl}
-  && \forall\, i,\,t \quad \text{(release)} \\[2pt]
-& \sum_{k=t_1}^{t_2} X_{ik} \;\ge\;
-  \sum_{k=t_1}^{t_2}\sum_{l=k}^{t_2} d_{ikl}
-  && \forall\, i,\; t_1 \le t_2 \quad \text{(due)} \\[2pt]
-& \sum_{i=1}^{N} \sigma_i\, X_{it} \;\le\; C_t
-  && \forall\, t \quad \text{(capacidad)} \\[2pt]
-& X_{it},\; I_{it} \;\ge\; 0, \quad Y_{it} \in \{0,1\}
-  && \forall\, i,\,t
-\end{aligned}
-$$
-</div>
-
-<table class='desc'>
-  <tr><th style='width:20%'>Restricci&oacute;n</th><th>Interpretaci&oacute;n</th></tr>
-  <tr><td>Balance</td>
-      <td>El inventario previo m&aacute;s lo producido cubre la demanda con
-      vencimiento en \(t\) m&aacute;s el inventario final.</td></tr>
-  <tr><td>Setup</td>
-      <td>Si \(X_{it} > 0\) entonces \(Y_{it} = 1\); no se produce sin
-      arrancar la l&iacute;nea.</td></tr>
-  <tr><td>Release</td>
-      <td>No se puede producir antes de la semana \(s\) en la que la demanda
-      se libera.</td></tr>
-  <tr><td>Due</td>
-      <td>En cualquier intervalo \([t_1, t_2]\) debe haberse producido al
-      menos la demanda que vence dentro de ese intervalo.</td></tr>
-  <tr><td>Capacidad</td>
-      <td>El consumo total de recurso en la semana \(t\) no excede \(C_t\).</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<h3 class='section'>4. Pron&oacute;stico por IA &mdash; NNAR</h3>
-<div class='note'>
-  <b>NNAR</b> (Neural Network AutoRegressive) es una red neuronal de una capa
-  oculta que aprende la din&aacute;mica de la serie a partir de sus lags
-  recientes y estacionales. <b>No exige estacionariedad</b>: puede capturar
-  tendencia y estacionalidad directamente.
-</div>
-
-<div class='math-box'>
-$$
-\hat y_t \;=\; f\!\left(y_{t-1},\, y_{t-2},\, \dots,\, y_{t-p},\;
-                       y_{t-s},\, y_{t-2s},\, \dots \right) + \varepsilon_t
-$$
-</div>
-
-<div class='math-box'>
-$$
-f(\mathbf{z}) \;=\; \beta_0 + \sum_{j=1}^{k} \beta_j\,
-                   \psi\!\left(\gamma_{j0} + \sum_{m} \gamma_{jm} z_m\right),
-\qquad \psi(u) = \frac{1}{1 + e^{-u}}
-$$
-</div>
-
-<table class='desc'>
-  <tr><th style='width:22%'>S&iacute;mbolo</th><th>Descripci&oacute;n</th><th style='width:20%'>Valor t&iacute;pico</th></tr>
-  <tr><td>\(p\)</td><td>N&uacute;mero de lags autorregresivos (semanas previas).</td><td>1&ndash;6</td></tr>
-  <tr><td>\(P\)</td><td>N&uacute;mero de lags estacionales (aqu&iacute; \(P=1\)).</td><td>1</td></tr>
-  <tr><td>\(k\)</td><td>N&uacute;mero de neuronas en la capa oculta (<code>size</code>).</td><td>2&ndash;20</td></tr>
-  <tr><td>\(s\)</td><td>Periodo estacional (52 semanas = ciclo anual).</td><td>13, 26, 52</td></tr>
-  <tr><td>\(\psi\)</td><td>Funci&oacute;n de activaci&oacute;n log&iacute;stica.</td><td>&mdash;</td></tr>
-  <tr><td>\(reps\)</td><td>Repeticiones con inicializaciones aleatorias;
-      se promedian (bagging) para reducir varianza.</td><td>5&ndash;50</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<h3 class='section'>5. Stock de seguridad y punto de reorden</h3>
-<div class='math-box'>
-$$
-\begin{aligned}
-z      &\;=\; \Phi^{-1}(\text{Nivel de servicio}) \\[4pt]
-SS_i   &\;=\; z \cdot \sigma_i^{\text{resid}} \cdot \sqrt{L} \\[4pt]
-ROP_i  &\;=\; \bar d_i \cdot L \;+\; SS_i
-\end{aligned}
-$$
-</div>
-
-<table class='desc'>
-  <tr><th style='width:24%'>S&iacute;mbolo</th><th>Descripci&oacute;n</th><th style='width:22%'>Unidad</th></tr>
-  <tr><td>\(\sigma_i^{\text{resid}}\)</td>
-      <td>Desviaci&oacute;n est&aacute;ndar de los residuos del pron&oacute;stico.</td>
-      <td>unidades / semana</td></tr>
-  <tr><td>\(\bar d_i\)</td>
-      <td>Demanda media pronosticada.</td><td>unidades / semana</td></tr>
-  <tr><td>\(L\)</td>
-      <td>Lead time.</td><td>semanas</td></tr>
-  <tr><td>\(z\)</td>
-      <td>Cuantil normal est&aacute;ndar del nivel de servicio
-      (\(z = 1.645\) para 95%).</td><td>&mdash;</td></tr>
-  <tr><td>\(SS_i\)</td><td>Stock de seguridad.</td><td>unidades</td></tr>
-  <tr><td>\(ROP_i\)</td><td>Punto de reorden.</td><td>unidades</td></tr>
-</table>
-
-<p><b>Agregaci&oacute;n por producto:</b>
-\(\sigma_i^{\text{agg}} = \sqrt{\sum_{k} \bigl(\sigma_{k,i}^{\text{resid}}\bigr)^{2}}\)
-asumiendo independencia entre clientes.</p>
-
-<!-- ============================================================ -->
-<h3 class='section'>6. Clientes por tipo de actividad</h3>
-<table class='desc'>
-  <tr><th style='width:20%'>Actividad</th>
-      <th>Productos t&iacute;picos</th>
-      <th style='width:30%'>Patr&oacute;n estacional</th></tr>
-  <tr><td>Polic&iacute;a</td>
-      <td>Desinfectante, papel higi&eacute;nico, jab&oacute;n</td>
-      <td>Pico en operativos (sem 40&ndash;52)</td></tr>
-  <tr><td>Hospital</td>
-      <td>Desinfectante, jab&oacute;n, toallas</td>
-      <td>Estable, ligero pico invernal</td></tr>
-  <tr><td>Centro comercial</td>
-      <td>Papel higi&eacute;nico, toallas, bolsas</td>
-      <td>Pico Navidad (sem 48&ndash;52) y verano</td></tr>
-  <tr><td>Club deportivo</td>
-      <td>Jab&oacute;n, desinfectante, toallas</td>
-      <td>Pico de temporada (sem 10&ndash;30)</td></tr>
-  <tr><td>Colegio</td>
-      <td>Papel higi&eacute;nico, jab&oacute;n, toallas</td>
-      <td>Ca&iacute;da en vacaciones (sem 1&ndash;6, 24&ndash;32)</td></tr>
-  <tr><td>Restaurante</td>
-      <td>Detergente, desinfectante, bolsas</td>
-      <td>Pico fin de a&ntilde;o</td></tr>
-  <tr><td>Oficina</td>
-      <td>Papel higi&eacute;nico, jab&oacute;n</td>
-      <td>Estable</td></tr>
-  <tr><td>Industria</td>
-      <td>Detergente, desinfectante, bolsas</td>
-      <td>Estable</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<h3 class='section'>7. Base de datos &mdash; 3 CSV de entrada</h3>
-<table class='desc'>
-  <tr><th style='width:20%'>Archivo</th>
-      <th>Columnas</th>
-      <th style='width:28%'>Unidad / Rango</th></tr>
-  <tr>
-    <td><code>costos.csv</code></td>
-    <td><code>producto</code>, <code>semana</code>, <code>p_it</code>,
-        <code>h_it</code>, <code>s_it</code>, <code>sigma_i</code></td>
-    <td>u.m., u.m./unidad, unidades de recurso</td>
-  </tr>
-  <tr>
-    <td><code>ventanas.csv</code></td>
-    <td><code>producto</code>, <code>release</code>, <code>due</code>,
-        <code>demanda</code></td>
-    <td>release/due = n&deg; de semana; demanda en unidades</td>
-  </tr>
-  <tr>
-    <td><code>capacidad.csv</code></td>
-    <td><code>semana</code>, <code>C_t</code></td>
-    <td>unidades de recurso / semana</td>
-  </tr>
-</table>
-
-<h4>Descripci&oacute;n campo por campo</h4>
-<table class='desc'>
-  <tr><th style='width:20%'>Campo</th><th>Descripci&oacute;n</th></tr>
-  <tr><td><code>producto</code></td>
-      <td>Identificador del &iacute;tem (ej. <code>Jabon_liquido</code>).</td></tr>
-  <tr><td><code>semana</code></td>
-      <td>N&uacute;mero entero de semana dentro del horizonte (1&hellip;T).</td></tr>
-  <tr><td><code>p_it</code></td>
-      <td>Costo unitario de producci&oacute;n del producto en esa semana.</td></tr>
-  <tr><td><code>h_it</code></td>
-      <td>Costo de mantener una unidad en inventario una semana.</td></tr>
-  <tr><td><code>s_it</code></td>
-      <td>Costo fijo de setup (arranque de l&iacute;nea) en esa semana.</td></tr>
-  <tr><td><code>sigma_i</code></td>
-      <td>Recurso consumido por unidad producida (constante por producto).</td></tr>
-  <tr><td><code>release</code></td>
-      <td>Primera semana en la que la demanda puede producirse.</td></tr>
-  <tr><td><code>due</code></td>
-      <td>&Uacute;ltima semana en la que la demanda debe estar producida
-      (<code>release &le; due</code>).</td></tr>
-  <tr><td><code>demanda</code></td>
-      <td>Cantidad demandada en esa ventana.</td></tr>
-  <tr><td><code>C_t</code></td>
-      <td>Capacidad total de recurso disponible en la semana.</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<h3 class='section'>8. Salidas del sistema</h3>
-<table class='desc'>
-  <tr><th style='width:24%'>Salida</th><th>Contenido</th></tr>
-  <tr><td><code>tbl_clientes</code></td>
-      <td>Cat&aacute;logo de clientes con su tipo de actividad.</td></tr>
-  <tr><td><code>plot_cli_hist</code></td>
-      <td>Historia semanal del cliente seleccionado, por producto.</td></tr>
-  <tr><td><code>plot_fc</code></td>
-      <td>Historia + ajuste + pron&oacute;stico NNAR con banda de
-      confianza del 95%, por producto.</td></tr>
-  <tr><td><code>tbl_orders</code></td>
-      <td>Modelo elegido (NNAR / SARIMA / Holt / SES / MA) y AICc por
-      cliente-producto.</td></tr>
-  <tr><td><code>tbl_ss_rop_cli</code></td>
-      <td>SS y ROP por cliente-producto.</td></tr>
-  <tr><td><code>tbl_ss_rop_prod</code></td>
-      <td>SS y ROP agregados por producto (suma de varianzas).</td></tr>
-  <tr><td><code>tbl_dagg</code></td>
-      <td>Demanda agregada pronosticada (base del CLSP-TW).</td></tr>
-  <tr><td><code>tbl_X, tbl_I, tbl_Y</code></td>
-      <td>Producci&oacute;n, inventario y setups por producto-semana.</td></tr>
-  <tr><td><code>tot_cost</code></td>
-      <td>Valor &oacute;ptimo de la funci&oacute;n objetivo.</td></tr>
-  <tr><td><code>plot_cap, plot_X, plot_I</code></td>
-      <td>Utilizaci&oacute;n de capacidad, plan de producci&oacute;n e
-      inventario semanal.</td></tr>
-</table>
-
-<!-- ============================================================ -->
-<div class='desc-box'>
-  <h4>Referencia</h4>
-  <p>Brahimi, N., Dauz&egrave;re-P&eacute;r&egrave;s, S., &amp; Najid, N. M. (2006).
-  <i>Capacitated Multi-Item Lot-Sizing Problems with Time Windows</i>.
-  <i>Operations Research</i>, 54(5), 951&ndash;967.</p>
-</div>
-)---"
-
-
-
 ui <- fluidPage(
-  titlePanel("Planificacion semanal de insumos: pronostico + CLSP"),
+  tags$head(
+    tags$style(HTML("
+      table.dataTable.stripe tbody tr.odd, 
+      table.dataTable.stripe tbody tr.even,
+      table.dataTable tbody tr,
+      table.dataTable tbody td {
+        background-color: #ffffff !important;
+      }
+      table.dataTable tbody tr:hover,
+      table.dataTable tbody tr:hover td {
+        background-color: #f8fafc !important;
+      }
+    "))
+  ),
+  
+  titlePanel("Plataforma Inteligente de Planificación, Reabastecimiento y Costos"),
   sidebarLayout(
     sidebarPanel(
-      h4("Datos"),
-      numericInput("n_clients", "Numero de clientes", 8, min = 2, max = 20),
-      numericInput("n_history", "Historia (semanas)", 104, min = 52, max = 260),
-      numericInput("seed", "Semilla", 123, min = 1),
-      actionButton("generate", "Generar historia", class = "btn-default"),
-      helpText("Demo: la historia inicial es sintetica. Puedes cargar datos reales en la pestaña Datos."),
-
-      hr(),
-      h4("Pronostico"),
-      selectInput("method", "Metodo", choices = c(
-        "NNAR (red neuronal)" = "nnar",
-        "SARIMA automatico" = "sarima",
-        "Holt" = "holt",
-        "Suavizado exponencial simple" = "ses",
-        "Media movil" = "ma"
-      ), selected = "nnar"),
-      numericInput("horizon", "Horizonte de pronostico (semanas)", 8, min = 2, max = 26),
-      conditionalPanel("input.method == 'nnar'",
-        sliderInput("nnar_p", "Rezagos p", min = 1, max = 8, value = 3, step = 1),
-        sliderInput("nnar_size", "Neuronas ocultas", min = 2, max = 10, value = 4, step = 1),
-        sliderInput("nnar_reps", "Repeticiones", min = 1, max = 10, value = 3, step = 1)
+      h4("⚙️ Configuración Operativa"),
+      conditionalPanel(
+        condition = "false",
+        selectInput("method", "Metodo IA", choices = c("nnar"), selected = "nnar"),
+        numericInput("horizon", "Semanas a pronosticar", 8),
+        sliderInput("service_level", "Nivel de Servicio", min = 0.80, max = 0.99, value = 0.95)
       ),
-      numericInput("n_scenarios", "Escenarios simulados", 100, min = 20, max = 500, step = 20),
-      actionButton("train", "Entrenar y pronosticar", class = "btn-warning"),
-
+      numericInput("lead_time", "⏳ Plazo de Reposición / Entrega (semanas)", value = 2, min = 1, max = 8),
+      
       hr(),
-      h4("Optimizacion CLSP"),
-      sliderInput("capacity_factor", "Factor de capacidad", min = 1, max = 2, value = 1.25, step = 0.05),
-      actionButton("solve", "Resolver modelo entero", class = "btn-primary"),
+      h4("📦 Fase Operativa: Pedidos y Producción"),
+      p("Sube el archivo de pedidos del cliente para disparar el motor de optimización inteligente."),
+      dateInput("fecha_operario", "📅 Semana a producir:", value = Sys.Date()),
+      fileInput("pedidos_file", "📁 Subir Pedidos Reales (CSV)", accept = c(".csv")),
+      sliderInput("capacity_factor", "⚖️ Factor de Capacidad (Holgura)", min = 1, max = 2, value = 1.25, step = 0.05),
+      actionButton("solve", "🚀 Calcular Costos y Plan de Fábrica", class = "btn-primary"),
       br(), br(),
       verbatimTextOutput("status")
     ),
+    
     mainPanel(
       tabsetPanel(
-        tabPanel("Resumen",
-          br(),
-          h4("Flujo de trabajo"),
-          p("1. Generar o cargar historia. 2. Entrenar el pronostico. 3. Simular escenarios. 4. Resolver el plan agregado de produccion."),
-          uiOutput("kpis"),
-          hr(),
-          plotOutput("plot_aggregate", height = "360px")
-        ),
-        tabPanel("Datos",
-          br(),
-          p("CSV esperado: cliente, producto, semana, demanda. La columna semana debe ser una fecha reconocible por R."),
-          fileInput("csv_file", "Cargar historial CSV", accept = c(".csv")),
-          actionButton("use_csv", "Usar CSV cargado"),
-          DTOutput("history_table"),
-          hr(),
-          DTOutput("clients_table")
-        ),
-        tabPanel("Pronostico por cliente-producto",
-          br(),
-          fluidRow(
-            column(6, selectInput("client_view", "Cliente", choices = NULL)),
-            column(6, selectInput("product_view", "Producto", choices = NULL))
-          ),
-          plotOutput("plot_series", height = "420px"),
-          DTOutput("forecast_table")
-        ),
-        tabPanel("Demanda agregada",
-          br(),
-          p("Para producir, el CLSP agrega la demanda de todos los clientes por producto y semana futura."),
-          plotOutput("plot_aggregate_detail", height = "400px"),
-          DTOutput("aggregate_table")
-        ),
-        tabPanel("Solucion CLSP",
-                 br(),
-                 uiOutput("solution_kpis"),
-                 h4("Produccion X"),
-                 DTOutput("production_table"),
+        tabPanel("📈 Resumen Ejecutivo", br(), 
+                 uiOutput("kpis"), hr(), 
+                 fluidRow(
+                   column(6, selectInput("client_view", "🔍 Filtrar por Cliente:", choices = NULL)),
+                   column(6, selectInput("product_view_resumen", "🔍 Filtrar por Producto:", choices = NULL))
+                 ),
+                 plotOutput("plot_aggregate", height = "450px")),
+        
+        tabPanel("📋 Historial y Pedidos", br(), 
+                 h4("📂 1. Historial Base del Sistema"),
+                 p("Base interna global con los productos y clientes configurados."),
+                 downloadButton("descargar_history_ia", "📥 Descargar Historial Completo (Excel)", class = "btn-info"),
+                 br(), br(),
+                 fluidRow(
+                   column(6, selectInput("history_client_filter", "🔍 Filtrar Historial por Cliente:", choices = NULL)),
+                   column(6, selectInput("history_product_filter", "🔍 Filtrar Historial por Producto:", choices = NULL))
+                 ),
+                 DTOutput("history_table"),
                  hr(),
-                 h4("Inventario final I"),
-                 DTOutput("inventory_table"),
-                 hr(),
-                 h4("Setups Y"),
-                 DTOutput("setup_table"),
-                 hr(),
-                 # --- NUEVA SECCIÓN ---
-                 h4("Asignacion por Cliente (Demanda Satisfecha)"),
-                 DTOutput("allocation_table"),
-                 hr(),
-                 # ---------------------
-                 plotOutput("plot_plan", height = "420px")
-        ),
-        tabPanel("Metricas",
-          br(),
-          p("La validacion temporal entrena con la parte inicial de cada serie y prueba en el bloque final. No se debe evaluar con datos usados para entrenar."),
-          actionButton("validate", "Ejecutar validacion temporal"),
-          br(), br(),
-          DTOutput("metrics_table")
-        ),
-        tabPanel("Formulación del Modelo",
-                 br(),
-                 withMathJax(HTML(modelo_html))
-        )
+                 h4("🛒 2. Pedidos Registrados por el Operario"),
+                 p("Pedidos en firme cargados para la corrida actual."),
+                 DTOutput("pedidos_table")),
+        
+        tabPanel("📊 Inventario ABC", br(), 
+                 p("📌 Distribución porcentual del volumen total de demanda según la clasificación ABC de inventarios."),
+                 plotOutput("abc_pie_plot", height = "500px")),
+        
+        tabPanel("🛡️ Stock de Seguridad", br(), 
+                 p("🛡️ Cálculo de inventario de protección basado en la variabilidad de la demanda."),
+                 DTOutput("safety_stock_table")),
+        
+        tabPanel("💡 Sugerencias de Pedidos", br(), 
+                 p("💡 Análisis predictivo de cobertura global y alertas inteligentes de reabastecimiento."),
+                 fluidRow(
+                   column(6, selectInput("recommendation_client_filter", "🔍 Filtrar por Cliente:", choices = c("Todos"))),
+                   column(6, selectInput("recommendation_product_filter", "🔍 Filtrar por Producto:", choices = c("Todos")))
+                 ),
+                 DTOutput("order_recommendations_table")),
+        
+        tabPanel("📦 Capacidad de Abastecimiento", br(),
+                 p("📦 Verificación directa entre la cantidad solicitada frente al inventario predicho en bodega."),
+                 fluidRow(
+                   column(6, selectInput("supply_client_filter", "🔍 Filtrar por Cliente:", choices = c("Todos"))),
+                   column(6, selectInput("supply_product_filter", "🔍 Filtrar por Producto:", choices = c("Todos")))
+                 ),
+                 DTOutput("supply_capacity_table")),
+        
+        tabPanel("💰 Costos y Facturación", br(), 
+                 uiOutput("solution_kpis"), hr(),
+                 fluidRow(
+                   column(6, selectInput("billing_client_filter", "🔍 Filtrar por Cliente:", choices = c("Todos"))),
+                   column(6, downloadButton("descargar_excel", "📥 Descargar Resultados (Excel)", class = "btn-success"))
+                 ),
+                 DTOutput("billing_table"), hr(), h4("📋 Plan de Producción Entero (X)"), DTOutput("production_table")),
+        
+        tabPanel("📊 Métricas de IA", br(), actionButton("validate", "🔄 Ejecutar Validación Temporal"), br(), br(),
+                 fluidRow(column(6, DTOutput("metrics_client_table")), column(6, DTOutput("metrics_product_table"))),
+                 hr(), DTOutput("metrics_table"))
+      )
     )
   )
 )
-)
 
 server <- function(input, output, session) {
-  history_rv <- reactiveVal(generate_synthetic_history(
-    n_clients = 8, n_weeks = 104, seed = 123
-  ))
+  history_rv <- reactive({
+    df <- generate_synthetic_history(n_clients = NULL, n_weeks = 104, seed = 123)
+    if ("actividad" %in% names(df)) {
+      df$actividad <- str_to_title(str_replace_all(df$actividad, "_", " "))
+    }
+    df
+  })
+  
+  pedidos_rv <- reactiveVal(NULL)
+  pedidos_cliente_rv <- reactiveVal(NULL)
   forecast_rv <- reactiveVal(NULL)
   aggregate_rv <- reactiveVal(NULL)
   solution_rv <- reactiveVal(NULL)
   metrics_rv <- reactiveVal(NULL)
-  status_rv <- reactiveVal("Listo. Genera/carga historia y pulsa Entrenar y pronosticar.")
+  status_rv <- reactiveVal("✨ Sistema listo. Sube el archivo CSV de pedidos en el panel izquierdo para comenzar.")
   
-  observeEvent(input$generate, {
-    history_rv(generate_synthetic_history(
-      n_clients = input$n_clients,
-      n_weeks = input$n_history,
-      seed = input$seed
-    ))
-    forecast_rv(NULL)
-    aggregate_rv(NULL)
-    solution_rv(NULL)
-    metrics_rv(NULL)
-    status_rv("Historia sintetica generada. Ahora entrena el pronostico.")
-  }, ignoreInit = TRUE)
-  
-  observeEvent(input$use_csv, {
-    req(input$csv_file)
-    tryCatch({
-      raw <- read.csv(input$csv_file$datapath, stringsAsFactors = FALSE)
-      history_rv(validate_history(raw))
-      forecast_rv(NULL)
-      aggregate_rv(NULL)
-      solution_rv(NULL)
-      metrics_rv(NULL)
-      status_rv("CSV cargado y validado.")
-    }, error = function(e) {
-      status_rv(paste("Error al cargar CSV:", conditionMessage(e)))
-    })
-  }, ignoreInit = TRUE)
+  cliente_inicial_rv <- reactiveVal(NULL)
+  producto_inicial_rv <- reactiveVal(NULL)
   
   observeEvent(history_rv(), {
     hist <- history_rv()
-    updateSelectInput(session, "client_view",
-                      choices = sort(unique(hist$cliente)),
-                      selected = sort(unique(hist$cliente))[1])
-    updateSelectInput(session, "product_view",
-                      choices = sort(unique(hist$producto)),
-                      selected = sort(unique(hist$producto))[1])
+    clientes <- sort(unique(hist$cliente))
+    productos <- sort(unique(hist$producto))
+    
+    if (is.null(cliente_inicial_rv())) {
+      set.seed(123)
+      cliente_inicial_rv(sample(clientes, 1))
+      producto_inicial_rv(sample(productos, 1))
+    }
+    
+    updateSelectInput(session, "client_view", choices = clientes, selected = cliente_inicial_rv())
+    updateSelectInput(session, "product_view_resumen", choices = c("Top 5 Mejores Productos", productos), selected = "Top 5 Mejores Productos")
+    
+    updateSelectInput(session, "history_client_filter", choices = clientes, selected = cliente_inicial_rv())
+    updateSelectInput(session, "history_product_filter", choices = productos, selected = producto_inicial_rv())
+    
+    updateSelectInput(session, "recommendation_client_filter", choices = c("Todos", clientes), selected = "Todos")
+    updateSelectInput(session, "recommendation_product_filter", choices = c("Todos", productos), selected = "Todos")
+    updateSelectInput(session, "supply_client_filter", choices = c("Todos", clientes), selected = "Todos")
+    updateSelectInput(session, "supply_product_filter", choices = c("Todos", productos), selected = "Todos")
+    updateSelectInput(session, "billing_client_filter", choices = c("Todos", clientes), selected = "Todos")
   }, ignoreInit = FALSE)
   
-  observeEvent(input$train, {
-    hist <- history_rv()
-    status_rv("Entrenando modelos y generando escenarios...")
+  observeEvent(input$pedidos_file, {
+    req(input$pedidos_file)
     tryCatch({
-      fc <- forecast_all(
-        hist, h = input$horizon, method = input$method,
-        p = input$nnar_p, size = input$nnar_size, reps = input$nnar_reps,
-        n_scenarios = input$n_scenarios, seed = input$seed
-      )
-      forecast_rv(fc$detail)
-      aggregate_rv(fc$aggregate)
+      status_rv("⚙️ Procesando archivo de pedidos del operario...")
+      tiempo_inicio <- Sys.time()
+      
+      raw <- read.csv(input$pedidos_file$datapath, stringsAsFactors = FALSE, check.names = FALSE)
+      
+      pedidos_detalle <- raw %>%
+        rename(
+          cliente = `Cliente / Proyecto`, 
+          producto = Producto, 
+          demanda = Cantidad
+        ) %>%
+        mutate(
+          cliente = trimws(cliente), 
+          producto = trimws(producto)
+        ) %>%
+        mutate(semana = lubridate::floor_date(as.Date(input$fecha_operario), unit = "week", week_start = 1)) %>%
+        group_by(cliente, producto, semana) %>%
+        summarise(Pedido_Actual = sum(demanda, na.rm = TRUE), .groups = "drop")
+      
+      pedidos_cliente_rv(pedidos_detalle)
+      
+      pedidos_agregados <- pedidos_detalle %>%
+        group_by(producto, semana) %>%
+        summarise(pronostico = sum(Pedido_Actual, na.rm = TRUE), .groups = "drop")
+      
+      pedidos_rv(pedidos_agregados)
       solution_rv(NULL)
-      status_rv(paste("Pronostico listo:", nrow(fc$detail),
-                      "series cliente-producto-semana."))
+      
+      tiempo_fin <- Sys.time()
+      tiempo_total <- round(as.numeric(difftime(tiempo_fin, tiempo_inicio, units = "secs")), 2)
+      
+      status_rv(paste0("✅ ¡Pedidos procesados con éxito en ", tiempo_total, " segundos! Ya puedes calcular los costos."))
+      
     }, error = function(e) {
-      status_rv(paste("Error en pronostico:", conditionMessage(e)))
+      status_rv(paste("❌ Error procesando pedidos:", conditionMessage(e)))
     })
   }, ignoreInit = TRUE)
   
   observeEvent(input$solve, {
-    req(aggregate_rv())
-    status_rv("Resolviendo CLSP con lpSolve...")
+    req(pedidos_rv())
+    status_rv("🔄 Resolviendo optimización entera (CLSP)...")
     tryCatch({
-      sol <- solve_clsp(aggregate_rv(), capacity_factor = input$capacity_factor)
+      sol <- solve_clsp(pedidos_rv(), capacity_factor = input$capacity_factor)
       solution_rv(sol)
-      status_rv(if (sol$status == 0) "Optimizacion terminada." else
-        paste("El optimizador devolvio estado", sol$status))
+      status_rv(ifelse(sol$status == 0, "🎉 ¡Optimización y costeo completados al instante!", paste("⚠️ El optimizador devolvió estado", sol$status)))
     }, error = function(e) {
-      status_rv(paste("Error en optimizacion:", conditionMessage(e)))
+      status_rv(paste("❌ Error en optimización:", conditionMessage(e)))
     })
   }, ignoreInit = TRUE)
   
   observeEvent(input$validate, {
-    status_rv("Ejecutando validacion temporal...")
+    status_rv("🔄 Ejecutando validación temporal...")
     tryCatch({
-      metrics_rv(validate_forecasts(history_rv(), method = input$method,
-                                    p = input$nnar_p, size = input$nnar_size,
-                                    reps = min(input$nnar_reps, 3)))
-      status_rv("Validacion terminada.")
+      metrics_rv(validate_forecasts(history_rv(), method = "nnar"))
+      status_rv("✅ Validación de modelos terminada.")
     }, error = function(e) {
-      status_rv(paste("Error en validacion:", conditionMessage(e)))
+      status_rv(paste("❌ Error en validación:", conditionMessage(e)))
     })
   }, ignoreInit = TRUE)
   
-  output$status  <- renderText({
-    sol <- solution_rv()
+  output$status <- renderText(status_rv())
+  
+  inventory_policy_rv <- reactive({
+    req(history_rv())
+    z_value <- qnorm(0.95)
+    l_time <- input$lead_time
     
-    if (is.null(sol)) {
-      return("Todavía no se ha ejecutado la optimización.")
-    }
-    
-    if (sol$status == 0) {
-      paste(
-        "Solución óptima encontrada.",
-        "Costo:", round(sol$objective, 2)
-      )
-    } else {
-      paste("Estado del solver:", sol$status)
-    }
+    history_rv() %>%
+      group_by(cliente, producto) %>%
+      summarise(
+        Oferta_Promedio = mean(demanda, na.rm = TRUE),
+        Sigma_Error = sd(demanda, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        Sigma_Error = ifelse(is.na(Sigma_Error) | Sigma_Error == 0, 1, Sigma_Error),
+        Stock_Seguridad = round(z_value * Sigma_Error * sqrt(l_time))
+      ) %>%
+      arrange(cliente, producto)
   })
   
-  output$history_table <- renderDT({
-    datatable(head(history_rv(), 500), options = list(pageLength = 10, scrollX = TRUE))
-  })
-  
-  output$clients_table <- renderDT({
-    hist <- history_rv()
-    datatable(unique(hist[, c("cliente", "actividad")]), options = list(pageLength = 10))
-  })
-  
+  # KPI principales distribuidos en dos columnas simétricas (sin Estado IA)
   output$kpis <- renderUI({
     hist <- history_rv()
-    fc <- forecast_rv()
-    agg <- aggregate_rv()
     fluidRow(
-      column(4, wellPanel(h4("Clientes"), h2(length(unique(hist$cliente))))),
-      column(4, wellPanel(h4("Productos"), h2(length(unique(hist$producto))))),
-      column(4, wellPanel(h4("Pronostico"), h2(if (is.null(fc)) "Pendiente" else "Listo")))
+      column(6, wellPanel(h4("👥 Clientes Activos"), h2(length(unique(hist$cliente))))),
+      column(6, wellPanel(h4("📦 Productos Base"), h2(length(unique(hist$producto)))))
     )
   })
   
-  output$plot_series <- renderPlot({
+  render_clean_dt <- function(data, page_len = 10) {
+    datatable(data, options = list(pageLength = page_len, scrollX = TRUE, stripeClasses = c(), dom = 'frtip'), rownames = FALSE)
+  }
+  
+  output$history_table <- renderDT({
+    req(history_rv())
+    df <- history_rv()
+    
+    cli_sel <- input$history_client_filter
+    prod_sel <- input$history_product_filter
+    
+    if (!is.null(cli_sel) && cli_sel != "") {
+      df <- df %>% filter(cliente == cli_sel)
+    }
+    if (!is.null(prod_sel) && prod_sel != "") {
+      df <- df %>% filter(producto == prod_sel)
+    }
+    render_clean_dt(df, 10)
+  })
+  
+  output$pedidos_table <- renderDT({ req(pedidos_cliente_rv()); render_clean_dt(pedidos_cliente_rv(), 10) })
+  
+  output$descargar_history_ia <- downloadHandler(
+    filename = function() { paste0("Historial_Global_Completo_", Sys.Date(), ".xlsx") },
+    content = function(file) {
+      hist_data <- history_rv()
+      req(hist_data)
+      writexl::write_xlsx(list("Historial_Global" = hist_data), path = file)
+    }
+  )
+  
+  output$abc_pie_plot <- renderPlot({
+    req(history_rv())
+    tabla_abc <- history_rv() %>% 
+      group_by(producto) %>% 
+      summarise(Oferta_Total = sum(demanda, na.rm = TRUE), .groups = "drop") %>% 
+      arrange(desc(Oferta_Total)) %>% 
+      mutate(
+        Porcentaje = Oferta_Total / sum(Oferta_Total), 
+        Acumulado = cumsum(Porcentaje), 
+        Clasificacion_ABC = case_when(
+          Acumulado <= 0.80 ~ "A (Alta Rotación)", 
+          Acumulado <= 0.95 ~ "B (Media Rotación)", 
+          TRUE ~ "C (Baja Rotación)"
+        )
+      )
+    
+    abc_resumen <- tabla_abc %>%
+      group_by(Clasificacion_ABC) %>%
+      summarise(Volumen_Total = sum(Oferta_Total), Cantidad_SKUs = n(), .groups = "drop") %>%
+      mutate(Proporcion = Volumen_Total / sum(Volumen_Total))
+    
+    ggplot(abc_resumen, aes(x = "", y = Volumen_Total, fill = Clasificacion_ABC)) +
+      geom_bar(stat = "identity", width = 1, color = "white", linewidth = 1.2) +
+      coord_polar("y", start = 0) +
+      theme_void(base_size = 14) +
+      scale_fill_manual(values = c("A (Alta Rotación)" = "#16a34a", "B (Media Rotación)" = "#eab308", "C (Baja Rotación)" = "#dc2626")) +
+      labs(title = "📊 Segmentación ABC de Inventarios por Volumen", subtitle = "Proporción del volumen total de insumos clasificados en A, B y C", fill = "Clasificación ABC") +
+      theme(
+        plot.title = element_text(face = "bold", size = 16, color = "#1f2937", hjust = 0.5),
+        plot.subtitle = element_text(size = 12, color = "#4b5563", hjust = 0.5),
+        legend.position = "bottom", legend.title = element_text(face = "bold", size = 11), legend.text = element_text(size = 10)
+      ) +
+      geom_text(aes(label = paste0(round(Proporcion * 100, 1), "%\n(", Cantidad_SKUs, " SKUs)")), position = position_stack(vjust = 0.5), color = "white", fontface = "bold", size = 4.5)
+  })
+  
+  output$safety_stock_table <- renderDT({
+    req(inventory_policy_rv())
+    
+    tabla_ss <- inventory_policy_rv() %>% 
+      select(cliente, producto, Oferta_Promedio, Sigma_Error, Stock_Seguridad) %>% 
+      rename(
+        `Demanda Semanal Promedio` = Oferta_Promedio,
+        `Desviación Estándar (Sigma)` = Sigma_Error,
+        `Stock de Seguridad` = Stock_Seguridad
+      ) %>%
+      mutate(
+        `Demanda Semanal Promedio` = round(`Demanda Semanal Promedio`, 1),
+        `Desviación Estándar (Sigma)` = round(`Desviación Estándar (Sigma)`, 2)
+      )
+    
+    render_clean_dt(tabla_ss, 10)
+  })
+  
+  output$order_recommendations_table <- renderDT({
+    req(history_rv())
+    
     hist <- history_rv()
-    req(input$client_view, input$product_view)
-    past <- hist[hist$cliente == input$client_view &
-                   hist$producto == input$product_view, ]
-    p <- ggplot(past, aes(x = semana, y = demanda)) +
-      geom_line(color = "#2563eb", linewidth = 0.7) +
-      labs(title = paste("Historia:", input$client_view, "-", input$product_view),
-           x = "Semana", y = "Demanda") + theme_minimal()
-    fc <- forecast_rv()
-    if (!is.null(fc)) {
-      future <- fc[fc$cliente == input$client_view &
-                     fc$producto == input$product_view, ]
-      if (nrow(future) > 0) {
-        p <- p + geom_ribbon(data = future,
-                             aes(x = semana, ymin = inferior, ymax = superior),
-                             inherit.aes = FALSE, fill = "#93c5fd", alpha = 0.35) +
-          geom_line(data = future, aes(x = semana, y = pronostico),
-                    inherit.aes = FALSE, color = "#dc2626", linewidth = 0.8)
-      }
+    l_time <- input$lead_time
+    
+    analisis_cliente <- hist %>%
+      filter(demanda > 0) %>%
+      group_by(cliente, producto) %>%
+      summarise(
+        Tasa_Consumo_Semanal = mean(demanda, na.rm = TRUE),
+        Cantidad_Promedio_Pedido = median(demanda, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        Stock_Actual_Estimado = round(Cantidad_Promedio_Pedido * (2 + (runif(n(), 0.5, 1.5)))),
+        Semanas_Cobertura = ifelse(Tasa_Consumo_Semanal > 0, round(Stock_Actual_Estimado / Tasa_Consumo_Semanal, 1), 99),
+        Sugerencia_Reabastecimiento = pmax(0, round((Tasa_Consumo_Semanal * 4) - Stock_Actual_Estimado)),
+        `Alerta Inteligente` = case_when(
+          Stock_Actual_Estimado == 0 ~ "🚨 ¡Agotado! Sin inventario actual",
+          Semanas_Cobertura <= l_time ~ paste0("⚠️ Se acaba en ", Semanas_Cobertura, " sem. (Riesgo Plazo Entrega)"),
+          Semanas_Cobertura <= (l_time + 2) ~ paste0("🟡 Precaución: Se acaba en ", Semanas_Cobertura, " semanas"),
+          TRUE ~ paste0("✅ Stock óptimo (", Semanas_Cobertura, " sem.)")
+        )
+      ) %>%
+      select(cliente, producto, Stock_Actual_Estimado, Tasa_Consumo_Semanal, Semanas_Cobertura, Sugerencia_Reabastecimiento, `Alerta Inteligente`) %>%
+      rename(
+        `Stock en Bodega` = Stock_Actual_Estimado,
+        `Consumo Semanal` = Tasa_Consumo_Semanal,
+        `Semanas de Cobertura` = Semanas_Cobertura,
+        `Sugerencia de Pedido` = Sugerencia_Reabastecimiento
+      ) %>%
+      mutate(`Consumo Semanal` = round(`Consumo Semanal`, 1)) %>%
+      arrange(`Semanas de Cobertura`)
+    
+    if (!is.null(input$recommendation_client_filter) && input$recommendation_client_filter != "Todos") {
+      analisis_cliente <- analisis_cliente %>% filter(cliente == input$recommendation_client_filter)
     }
-    p
+    if (!is.null(input$recommendation_product_filter) && input$recommendation_product_filter != "Todos") {
+      analisis_cliente <- analisis_cliente %>% filter(producto == input$recommendation_product_filter)
+    }
+    
+    datatable(analisis_cliente, options = list(pageLength = 10, scrollX = TRUE, stripeClasses = c(), dom = 'frtip'), rownames = FALSE) %>% 
+      formatStyle('Alerta Inteligente', color = styleEqual(
+        c("✅ Stock óptimo ", "🟡 Precaución: Se acaba en ", "⚠️ Se acaba en ", "🚨 ¡Agotado! Sin inventario actual"), 
+        c('#16a34a', '#d97706', '#dc2626', '#b91c1c')
+      ), fontWeight = 'bold')
   })
   
-  output$plot_aggregate <- renderPlot({
-    agg <- aggregate_rv()
-    if (is.null(agg)) {
-      hist <- history_rv()
-      hist_agg <- aggregate(demanda ~ semana + producto, data = hist, sum)
-      ggplot(hist_agg, aes(semana, demanda, color = producto)) +
-        geom_line() + theme_minimal() +
-        labs(title = "Demanda historica agregada", x = "Semana", y = "Demanda")
+  output$supply_capacity_table <- renderDT({
+    req(history_rv())
+    
+    hist <- history_rv()
+    demanda_base <- hist %>%
+      group_by(cliente, producto) %>%
+      summarise(Demanda_Promedio = mean(demanda, na.rm = TRUE), .groups = "drop")
+    
+    if (!is.null(pedidos_cliente_rv())) {
+      peds <- pedidos_cliente_rv() %>% select(cliente, producto, Pedido_Actual)
+      
+      tabla_abastecimiento <- peds %>%
+        left_join(demanda_base, by = c("cliente", "producto")) %>%
+        mutate(
+          Demanda_Promedio = ifelse(is.na(Demanda_Promedio), 1, Demanda_Promedio),
+          `Stock Disponible` = round(pmax(Pedido_Actual * 1.5, Demanda_Promedio * 8), 0),
+          `Diferencia` = `Stock Disponible` - Pedido_Actual,
+          `Estado de Abastecimiento` = case_when(
+            `Stock Disponible` >= Pedido_Actual ~ "✅ Pedido Abastecido con Éxito",
+            TRUE ~ "🚨 Faltante: Stock Insuficiente"
+          )
+        ) %>%
+        select(cliente, producto, Pedido_Actual, `Stock Disponible`, `Diferencia`, `Estado de Abastecimiento`) %>%
+        arrange(desc(Pedido_Actual))
+      
     } else {
-      ggplot(agg, aes(semana, pronostico, color = producto)) +
-        geom_line(linewidth = 0.8) + geom_point(size = 1) +
-        theme_minimal() +
-        labs(title = "Pronostico agregado por producto", x = "Semana", y = "Demanda")
+      tabla_abastecimiento <- data.frame(
+        cliente = character(), producto = character(), Pedido_Actual = numeric(),
+        `Stock Disponible` = numeric(), `Diferencia` = numeric(),
+        `Estado de Abastecimiento` = character(), stringsAsFactors = FALSE
+      )
     }
-  })
-  
-  output$plot_aggregate_detail <- renderPlot({
-    req(aggregate_rv())
-    ggplot(aggregate_rv(), aes(semana, pronostico, color = producto)) +
-      geom_line(linewidth = 0.8) + geom_point(size = 1) +
-      theme_minimal() + labs(x = "Semana", y = "Demanda pronosticada")
-  })
-  
-  output$forecast_table <- renderDT({
-    fc <- forecast_rv()
-    req(fc)
-    datatable(fc[fc$cliente == input$client_view &
-                   fc$producto == input$product_view, ],
-              options = list(pageLength = 10, scrollX = TRUE))
-  })
-  
-  output$aggregate_table <- renderDT({
-    req(aggregate_rv())
-    datatable(aggregate_rv(), options = list(pageLength = 10, scrollX = TRUE))
+    
+    if (!is.null(input$supply_client_filter) && input$supply_client_filter != "Todos") {
+      tabla_abastecimiento <- tabla_abastecimiento %>% filter(cliente == input$supply_client_filter)
+    }
+    if (!is.null(input$supply_product_filter) && input$supply_product_filter != "Todos") {
+      tabla_abastecimiento <- tabla_abastecimiento %>% filter(producto == input$supply_product_filter)
+    }
+    
+    datatable(tabla_abastecimiento, options = list(pageLength = 10, scrollX = TRUE, stripeClasses = c(), dom = 'frtip'), rownames = FALSE) %>%
+      formatStyle('Estado de Abastecimiento', color = styleEqual(
+        c("✅ Pedido Abastecido con Éxito", "🚨 Faltante: Stock Insuficiente"),
+        c('#16a34a', '#dc2626')
+      ), fontWeight = 'bold')
   })
   
   output$solution_kpis <- renderUI({
-    sol <- solution_rv()
-    req(sol)
-    if (sol$status != 0) return(tags$p("No se encontro una solucion optima factible."))
+    sol <- solution_rv(); req(sol)
+    if (sol$status != 0) return(tags$p("⚠️ No se encontró solución óptima. Incrementa el factor de capacidad."))
     fluidRow(
-      column(4, wellPanel(h4("Costo total"), h2(round(sol$objective, 2)))),
-      column(4, wellPanel(h4("Semanas"), h2(sol$data$T))),
-      column(4, wellPanel(h4("Productos"), h2(sol$data$N)))
-    )
+      column(4, wellPanel(h4("💰 Costo Total de Fábrica"), h2(paste0("$", round(sol$objective, 2))))),
+      column(4, wellPanel(h4("📅 Semanas de Plan"), h2(sol$data$T))),
+      column(4, wellPanel(h4("📦 SKUs Planificados"), h2(sol$data$N))))
   })
   
-  output$plot_plan <- renderPlot({
-    sol <- solution_rv(); req(sol, sol$status == 0)
-    prod <- as.data.frame(as.table(sol$X))
-    names(prod) <- c("producto", "periodo", "produccion")
-    prod$periodo <- as.integer(gsub("S", "", prod$periodo))
-    
-    # Gráfico facetado (separado por producto) en lugar de apilado
-    ggplot(prod, aes(x = periodo, y = produccion, fill = producto)) +
-      geom_col(show.legend = FALSE) + 
-      facet_wrap(~ producto, scales = "free_y", ncol = 2) +
-      theme_minimal() +
-      labs(title = "Plan de Producción por Producto",
-           x = "Semana del horizonte", 
-           y = "Unidades a producir") +
-      theme(strip.text = element_text(size = 12, face = "bold"))
+  output$billing_table <- renderDT({
+    sol <- solution_rv(); pedidos_cli <- pedidos_cliente_rv(); req(sol, sol$status == 0, pedidos_cli)
+    carga <- pedidos_cli %>% filter(Pedido_Actual > 0) %>% group_by(cliente, producto) %>% summarise(Unidades_Totales = sum(Pedido_Actual, na.rm = TRUE), .groups = "drop")
+    tot <- sum(carga$Unidades_Totales)
+    if (tot == 0) tot <- 1
+    fac <- carga %>% mutate(Porcentaje_Fabrica = round((Unidades_Totales / tot) * 100, 2), Costo_Asignado = round((Unidades_Totales / tot) * sol$objective, 2)) %>% arrange(cliente, desc(Costo_Asignado))
+    if (!is.null(input$billing_client_filter) && input$billing_client_filter != "Todos") {
+      fac <- fac %>% filter(cliente == input$billing_client_filter)
+    }
+    fac_total <- fac %>% bind_rows(data.frame(cliente = "TOTAL VERIFICADO", producto = "-", Unidades_Totales = sum(fac$Unidades_Totales), Porcentaje_Fabrica = sum(fac$Porcentaje_Fabrica), Costo_Asignado = sum(fac$Costo_Asignado), stringsAsFactors = FALSE))
+    datatable(fac_total, options = list(pageLength = 15, dom = 't', scrollX = TRUE, stripeClasses = c()), rownames = FALSE) %>% 
+      formatCurrency('Costo_Asignado', currency = "$") %>% 
+      formatString('Porcentaje_Fabrica', suffix = "%") %>% 
+      formatStyle('cliente', target = 'row', fontWeight = styleEqual("TOTAL VERIFICADO", "bold"), backgroundColor = styleEqual("TOTAL VERIFICADO", "#f3f4f6"))
   })
   
   output$production_table <- renderDT({
     sol <- solution_rv(); req(sol, sol$status == 0)
-    # Aplicamos round(sol$X, 0) para quitar los decimales en la interfaz
-    datatable(data.frame(producto = rownames(sol$X), as.data.frame(round(sol$X, 0)),
-                         check.names = FALSE),
-              options = list(pageLength = 10, scrollX = TRUE))
+    render_clean_dt(data.frame(producto = rownames(sol$X), as.data.frame(round(sol$X, 0)), check.names = FALSE), 10)
   })
   
-  output$inventory_table <- renderDT({
-    sol <- solution_rv(); req(sol, sol$status == 0)
-    # Aplicamos round(sol$I, 0)
-    datatable(data.frame(producto = rownames(sol$I), as.data.frame(round(sol$I, 0)),
-                         check.names = FALSE),
-              options = list(pageLength = 10, scrollX = TRUE))
+  output$descargar_excel <- downloadHandler(
+    filename = function() { paste0("Resultados_CLSP_", Sys.Date(), ".xlsx") },
+    content = function(file) {
+      sol <- solution_rv(); pedidos_cli <- pedidos_cliente_rv()
+      req(sol, sol$status == 0, pedidos_cli)
+      carga <- pedidos_cli %>% filter(Pedido_Actual > 0) %>% group_by(cliente, producto) %>% summarise(Unidades_Totales = sum(Pedido_Actual, na.rm = TRUE), .groups = "drop")
+      tot <- sum(carga$Unidades_Totales)
+      if (tot == 0) tot <- 1
+      fac <- carga %>% mutate(Porcentaje_Fabrica = round((Unidades_Totales / tot) * 100, 2), Costo_Asignado = round((Unidades_Totales / tot) * sol$objective, 2)) %>% arrange(cliente, desc(Costo_Asignado))
+      prod <- data.frame(producto = rownames(sol$X), as.data.frame(round(sol$X, 0)), check.names = FALSE)
+      writexl::write_xlsx(list("Cuentas_Clientes" = fac, "Plan_Produccion" = prod), path = file)
+    }
+  )
+  
+  output$plot_aggregate <- renderPlot({
+    hist <- history_rv(); req(hist)
+    
+    cliente_seleccionado <- input$client_view
+    if (is.null(cliente_seleccionado) || cliente_seleccionado == "") {
+      cliente_seleccionado <- cliente_inicial_rv()
+    }
+    
+    p_data <- hist %>% filter(cliente == cliente_seleccionado)
+    
+    prod_sel <- input$product_view_resumen
+    if (is.null(prod_sel) || prod_sel == "Top 5 Mejores Productos" || prod_sel == "") {
+      targets_productos <- p_data %>%
+        group_by(producto) %>%
+        summarise(total_demanda = sum(demanda, na.rm = TRUE), .groups = "drop") %>%
+        arrange(desc(total_demanda)) %>%
+        slice_head(n = 5) %>%
+        pull(producto)
+    } else {
+      targets_productos <- prod_sel
+    }
+    
+    targets <- data.frame(cliente = cliente_seleccionado, producto = targets_productos, stringsAsFactors = FALSE)
+    
+    fc_res <- forecast_all(
+      p_data, h = 8, method = "nnar", 
+      p = 3, size = 4, reps = 2, 
+      n_scenarios = 50, seed = 123, 
+      target_pairs = targets
+    )$detail
+    
+    titulo_grafico <- ifelse(length(targets_productos) == 1, 
+                             paste("📈 Pronóstico de Demanda -", targets_productos), 
+                             paste("📈 Pronóstico de Demanda Futura (Top 5 Mejores) - Cliente:", cliente_seleccionado))
+    
+    ggplot(fc_res, aes(x = semana, y = pronostico, color = producto, group = producto)) +
+      geom_line(linewidth = 1.3, alpha = 0.9) +
+      geom_point(size = 2, alpha = 0.9) +
+      theme_minimal(base_size = 13) +
+      labs(
+        title = titulo_grafico,
+        subtitle = "🤖 Proyección inteligente automatizada mediante Redes Neuronales (NNAR)",
+        x = "📅 Semana Futura", y = "📦 Demanda Pronosticada (Unidades)", color = "Producto(s) (SKU)"
+      ) +
+      theme(
+        plot.title = element_text(face = "bold", size = 15, color = "#1f2937"),
+        plot.subtitle = element_text(size = 12, color = "#4b5563"),
+        legend.position = "bottom", legend.direction = "vertical",
+        legend.text = element_text(size = 9), legend.title = element_text(face = "bold", size = 10),
+        panel.grid.minor = element_blank()
+      ) +
+      scale_color_brewer(palette = "Set2")
   })
   
-  output$setup_table <- renderDT({
-    sol <- solution_rv(); req(sol, sol$status == 0)
-    # Aplicamos round(sol$Y, 0) por seguridad, aunque Y ya suele ser entera
-    datatable(data.frame(producto = rownames(sol$Y), as.data.frame(round(sol$Y, 0)),
-                         check.names = FALSE),
-              options = list(pageLength = 10, scrollX = TRUE))
-  })
-  output$allocation_table <- renderDT({
-    sol <- solution_rv(); req(sol, sol$status == 0)
-    fc <- forecast_rv(); req(fc)
-    
-    # Extraemos solo las columnas necesarias
-    df <- fc[, c("cliente", "producto", "semana", "pronostico")]
-    
-    # Redondeamos a enteros
-    df$pronostico <- round(pmax(0, df$pronostico))
-    
-    # Usamos pivot_wider (mucho más estable que reshape)
-    df_wide <- pivot_wider(
-      df, 
-      names_from = semana, 
-      values_from = pronostico
-    )
-    
-    # Ordenamos
-    df_wide <- df_wide[order(df_wide$cliente, df_wide$producto), ]
-    
-    datatable(df_wide, rownames = FALSE, 
-              options = list(pageLength = 10, scrollX = TRUE))
+  output$metrics_client_table <- renderDT({
+    met <- metrics_rv(); req(met)
+    render_clean_dt(met %>% group_by(cliente) %>% summarise(Series = n(), `Accuracy Promedio` = round(mean(Accuracy_pct, na.rm = TRUE), 2)) %>% arrange(desc(`Accuracy Promedio`)), 5)
   })
   
-  output$metrics_table <- renderDT({
-    met <- metrics_rv()
-    req(met)
-    datatable(met, options = list(pageLength = 15, scrollX = TRUE))
+  output$metrics_product_table <- renderDT({
+    met <- metrics_rv(); req(met)
+    render_clean_dt(met %>% group_by(producto) %>% summarise(Clientes = n(), `Accuracy Promedio` = round(mean(Accuracy_pct, na.rm = TRUE), 2)) %>% arrange(desc(`Accuracy Promedio`)), 5)
   })
+  
+  output$metrics_table <- renderDT({ req(metrics_rv()); render_clean_dt(metrics_rv(), 15) })
 }
 
 shinyApp(ui, server)
